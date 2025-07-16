@@ -20,8 +20,8 @@ class WasteCollectionRobot:
         GPIO.setup([self.IN1, self.IN2, self.IN3, self.IN4], GPIO.OUT)
         
         # Class names (match your training YAML)
-        self.CLASS_NAMES = ['can', 'bottle', 'box', 'paper', 'plastic', 'glass']
-        self.TARGET_CLASSES = {'can', 'plastic'}
+        self.CLASS_NAMES = ['can', 'plastic bottle', 'salvinia', 'water lettuce', 'plastic bag', 'water hyacinth']
+        self.TARGET_CLASSES = {'can', 'plastic bottle', 'salvinia', 'water lettuce', 'plastic bag', 'water hyacinth'}
         
         # Detection parameters
         self.CONFIDENCE_THRESHOLD = 0.4
