@@ -159,10 +159,11 @@ def preprocess_image(img, target_size):
     """
     Preprocess image for YOLOv5 TorchScript model
     """
+    original_h, original_w = img.shape[:2]
+    
     # Resize image while maintaining aspect ratio
-    h, w = img.shape[:2]
-    scale = min(target_size / h, target_size / w)
-    new_h, new_w = int(h * scale), int(w * scale)
+    scale = min(target_size / original_h, target_size / original_w)
+    new_h, new_w = int(original_h * scale), int(original_w * scale)
     
     # Resize image
     img_resized = cv2.resize(img, (new_w, new_h))
@@ -184,67 +185,98 @@ def preprocess_image(img, target_size):
     # Convert to tensor format (CHW)
     img_tensor = torch.from_numpy(img_normalized).permute(2, 0, 1).unsqueeze(0).to(device)
     
-    return img_tensor, scale, pad_x, pad_y
+    return img_tensor, scale, pad_x, pad_y, original_w, original_h
 
-def postprocess_detections(predictions, original_shape, scale, pad_x, pad_y, conf_threshold=0.5):
+def postprocess_detections(predictions, original_w, original_h, scale, pad_x, pad_y, conf_threshold=0.5):
     """
-    Post-process YOLOv5 TorchScript model predictions
+    Post-process YOLOv5 TorchScript model predictions with flexible handling
     """
-    # predictions shape: [batch_size, num_detections, 85] (for COCO)
-    # Each detection: [x_center, y_center, width, height, confidence, class_scores...]
-    
     detections = []
+    
+    # Handle different prediction formats
+    if isinstance(predictions, (list, tuple)):
+        predictions = predictions[0]
     
     if len(predictions.shape) == 3:
         predictions = predictions[0]  # Remove batch dimension
     
+    # Dynamic handling of prediction format
+    if predictions.shape[-1] < 5:
+        print(f"Warning: Unexpected prediction format with {predictions.shape[-1]} values per detection")
+        return detections
+    
+    num_classes = len(labels)
+    expected_channels = 5 + num_classes  # x, y, w, h, confidence + class scores
+    
+    print(f"Prediction shape: {predictions.shape}")
+    print(f"Expected channels: {expected_channels}, Actual channels: {predictions.shape[-1]}")
+    
     for detection in predictions:
-        # Extract confidence and class scores
-        confidence = detection[4].item()
+        if len(detection) < 5:
+            continue
+            
+        # Extract basic detection info
+        x_center, y_center, width, height, confidence = detection[:5]
         
-        if confidence > conf_threshold:
-            # Get class with highest score
-            class_scores = detection[5:]
-            class_id = torch.argmax(class_scores).item()
-            class_confidence = class_scores[class_id].item()
+        if confidence.item() < conf_threshold:
+            continue
+        
+        # Handle class scores based on available data
+        if len(detection) > 5:
+            # Method 1: Class scores available
+            class_scores = detection[5:5+num_classes] if len(detection) >= 5+num_classes else detection[5:]
+            if len(class_scores) > 0:
+                class_id = torch.argmax(class_scores).item()
+                class_confidence = class_scores[class_id].item() if class_id < len(class_scores) else 0.5
+            else:
+                class_id = 0
+                class_confidence = 0.5
+        else:
+            # Method 2: No class scores, assume single class or use confidence
+            class_id = 0
+            class_confidence = confidence.item()
+        
+        # Ensure class_id is within bounds
+        class_id = min(class_id, len(labels) - 1)
+        
+        # Calculate final confidence
+        final_confidence = confidence.item() * class_confidence
+        
+        if final_confidence > conf_threshold:
+            # Convert coordinates
+            x_center = x_center.item()
+            y_center = y_center.item()
+            width = width.item()
+            height = height.item()
             
-            # Calculate final confidence
-            final_confidence = confidence * class_confidence
+            # Adjust for padding and scaling
+            x_center = (x_center - pad_x) / scale
+            y_center = (y_center - pad_y) / scale
+            width = width / scale
+            height = height / scale
             
-            if final_confidence > conf_threshold:
-                # Convert from center coordinates to corner coordinates
-                x_center, y_center, width, height = detection[:4]
-                
-                # Convert from normalized coordinates to pixel coordinates
-                x_center = x_center.item()
-                y_center = y_center.item()
-                width = width.item()
-                height = height.item()
-                
-                # Adjust for padding
-                x_center = (x_center - pad_x) / scale
-                y_center = (y_center - pad_y) / scale
-                width = width / scale
-                height = height / scale
-                
-                # Convert to corner coordinates
-                x1 = int(x_center - width / 2)
-                y1 = int(y_center - height / 2)
-                x2 = int(x_center + width / 2)
-                y2 = int(y_center + height / 2)
-                
-                # Clip to image boundaries
-                x1 = max(0, min(x1, original_shape[1]))
-                y1 = max(0, min(y1, original_shape[0]))
-                x2 = max(0, min(x2, original_shape[1]))
-                y2 = max(0, min(y2, original_shape[0]))
-                
-                detections.append({
-                    'bbox': [x1, y1, x2, y2],
-                    'confidence': final_confidence,
-                    'class_id': class_id,
-                    'class_name': labels[class_id] if class_id < len(labels) else f'class_{class_id}'
-                })
+            # Convert to corner coordinates
+            x1 = int(x_center - width / 2)
+            y1 = int(y_center - height / 2)
+            x2 = int(x_center + width / 2)
+            y2 = int(y_center + height / 2)
+            
+            # Clip to image boundaries
+            x1 = max(0, min(x1, original_w))
+            y1 = max(0, min(y1, original_h))
+            x2 = max(0, min(x2, original_w))
+            y2 = max(0, min(y2, original_h))
+            
+            # Skip invalid boxes
+            if x2 <= x1 or y2 <= y1:
+                continue
+            
+            detections.append({
+                'bbox': [x1, y1, x2, y2],
+                'confidence': final_confidence,
+                'class_id': class_id,
+                'class_name': labels[class_id] if class_id < len(labels) else f'class_{class_id}'
+            })
     
     return detections
 
@@ -290,14 +322,31 @@ while True:
         display_frame = cv2.resize(display_frame, (resW, resH))
 
     # Preprocess image for model inference
-    input_tensor, scale, pad_x, pad_y = preprocess_image(frame, img_size)
+    try:
+        input_tensor, scale, pad_x, pad_y, original_w, original_h = preprocess_image(frame, img_size)
+    except Exception as e:
+        print(f"Error in preprocessing: {e}")
+        continue
 
-    # Run inference
-    with torch.no_grad():
-        predictions = model(input_tensor)
+    # Run inference with error handling
+    try:
+        with torch.no_grad():
+            predictions = model(input_tensor)
+    except RuntimeError as e:
+        print(f"Model inference error: {e}")
+        print("This might indicate a model compatibility issue.")
+        print("Try re-exporting your model with the correct configuration.")
+        break
+    except Exception as e:
+        print(f"Unexpected error during inference: {e}")
+        continue
 
     # Post-process predictions
-    detections = postprocess_detections(predictions, original_shape, scale, pad_x, pad_y, min_thresh)
+    try:
+        detections = postprocess_detections(predictions, original_w, original_h, scale, pad_x, pad_y, min_thresh)
+    except Exception as e:
+        print(f"Error in postprocessing: {e}")
+        detections = []
 
     # Initialize variable for basic object counting example
     object_count = len(detections)
@@ -311,8 +360,8 @@ while True:
 
         # Scale coordinates if display frame is resized
         if resize:
-            scale_x = resW / original_shape[1]
-            scale_y = resH / original_shape[0]
+            scale_x = resW / original_w
+            scale_y = resH / original_h
             x1 = int(x1 * scale_x)
             y1 = int(y1 * scale_y)
             x2 = int(x2 * scale_x)
