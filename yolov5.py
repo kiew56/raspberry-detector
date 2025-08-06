@@ -4,127 +4,40 @@ import argparse
 import glob
 import time
 import json
-
 import cv2
 import numpy as np
 import onnxruntime as ort
 import RPi.GPIO as GPIO
 
-# Motor control setup
-class MotorController:
-    def __init__(self, in1=18, in2=19, in3=20, in4=21, ena=12, enb=13):
-        self.IN1 = in1
-        self.IN2 = in2
-        self.IN3 = in3
-        self.IN4 = in4
-        self.ENA = ena
-        self.ENB = enb
-        
-        # GPIO setup
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup([self.IN1, self.IN2, self.IN3, self.IN4], GPIO.OUT)
-        GPIO.setup([self.ENA, self.ENB], GPIO.OUT)
-        
-        # PWM setup for speed control
-        self.pwm_a = GPIO.PWM(self.ENA, 1000)
-        self.pwm_b = GPIO.PWM(self.ENB, 1000)
-        self.pwm_a.start(0)
-        self.pwm_b.start(0)
-        
-        self.speed = 70  # Default speed (0-100)
-        
-    def move_forward(self, duration=1.0):
-        """Move forward for specified duration"""
-        GPIO.output(self.IN1, GPIO.HIGH)
-        GPIO.output(self.IN2, GPIO.LOW)
-        GPIO.output(self.IN3, GPIO.HIGH)
-        GPIO.output(self.IN4, GPIO.LOW)
-        self.pwm_a.ChangeDutyCycle(self.speed)
-        self.pwm_b.ChangeDutyCycle(self.speed)
-        time.sleep(duration)
-        self.stop()
-        
-    def turn_left(self, duration=0.5):
-        """Turn left for specified duration"""
-        GPIO.output(self.IN1, GPIO.LOW)
-        GPIO.output(self.IN2, GPIO.HIGH)
-        GPIO.output(self.IN3, GPIO.HIGH)
-        GPIO.output(self.IN4, GPIO.LOW)
-        self.pwm_a.ChangeDutyCycle(self.speed)
-        self.pwm_b.ChangeDutyCycle(self.speed)
-        time.sleep(duration)
-        self.stop()
-        
-    def turn_right(self, duration=0.5):
-        """Turn right for specified duration"""
-        GPIO.output(self.IN1, GPIO.HIGH)
-        GPIO.output(self.IN2, GPIO.LOW)
-        GPIO.output(self.IN3, GPIO.LOW)
-        GPIO.output(self.IN4, GPIO.HIGH)
-        self.pwm_a.ChangeDutyCycle(self.speed)
-        self.pwm_b.ChangeDutyCycle(self.speed)
-        time.sleep(duration)
-        self.stop()
-        
-    def stop(self):
-        """Stop all motors"""
-        GPIO.output([self.IN1, self.IN2, self.IN3, self.IN4], GPIO.LOW)
-        self.pwm_a.ChangeDutyCycle(0)
-        self.pwm_b.ChangeDutyCycle(0)
-        
-    def cleanup(self):
-        """Clean up GPIO resources"""
-        self.stop()
-        self.pwm_a.stop()
-        self.pwm_b.stop()
-        GPIO.cleanup()
-
 # Define and parse user input arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--model', help='Path to ONNX model file (example: "yolov5s.onnx")',
-                    required=True)
-parser.add_argument('--source', help='Image source, can be image file ("test.jpg"), \
-                    image folder ("test_dir"), video file ("testvid.mp4"), or index of USB camera ("usb0")', 
-                    required=True)
+#parser.add_argument('--model', help='Path to YOLOv5 ONNX model file (example: "yolov5s.onnx")',
+ #                   required=True)
+#parser.add_argument('--source', help='Image source, can be image file ("test.jpg"), \
+#                    image folder ("test_dir"), video file ("testvid.mp4"), or index of USB camera ("usb0")', 
+#                    required=True)
 parser.add_argument('--thresh', help='Minimum confidence threshold for displaying detected objects (example: "0.4")',
-                    default=0.5, type=float)
-parser.add_argument('--resolution', help='Resolution in WxH to display inference results at (example: "640x480"), \
-                    otherwise, match source resolution',
-                    default=None)
+                   default=0.5, type=float)
+#parser.add_argument('--resolution', help='Resolution in WxH to display inference results at (example: "640x480"), \
+ #                   otherwise, match source resolution',
+ #                   default=None)
 parser.add_argument('--record', help='Record results from video or webcam and save it as "demo1.avi". Must specify --resolution argument to record.',
                     action='store_true')
 parser.add_argument('--labels', help='Path to labels file (JSON format with class names)', 
                     default=None)
 parser.add_argument('--img-size', help='Input image size for model inference (default: 640)',
                     default=640, type=int)
-parser.add_argument('--enable-motors', help='Enable motor control when objects are detected',
-                    action='store_true')
-parser.add_argument('--motor-speed', help='Motor speed (0-100, default: 70)',
-                    default=70, type=int)
 
 args = parser.parse_args()
 
 # Parse user inputs
-model_path = args.model
-img_source = args.source
+model_path = 'best.onnx'
+img_source = 'picamera0'
 min_thresh = args.thresh
-user_res = args.resolution
+user_res = '480x360'
 record = args.record
 labels_path = args.labels
 img_size = args.img_size
-enable_motors = args.enable_motors
-motor_speed = args.motor_speed
-
-# Initialize motor controller if enabled
-motor_controller = None
-if enable_motors:
-    try:
-        motor_controller = MotorController()
-        motor_controller.speed = motor_speed
-        print(f"Motor controller initialized with speed: {motor_speed}")
-    except Exception as e:
-        print(f"Warning: Could not initialize motor controller: {e}")
-        enable_motors = False
 
 # Check if model file exists and is valid
 if not os.path.exists(model_path):
@@ -134,19 +47,8 @@ if not os.path.exists(model_path):
 # Load the ONNX model
 print(f"Loading ONNX model from {model_path}")
 try:
-    providers = ['CPUExecutionProvider']
-    if 'CUDAExecutionProvider' in ort.get_available_providers():
-        providers.insert(0, 'CUDAExecutionProvider')
-    
-    session = ort.InferenceSession(model_path, providers=providers)
-    print(f"Model loaded successfully with providers: {session.get_providers()}")
-    
-    # Get model input/output info
-    input_info = session.get_inputs()[0]
-    output_info = session.get_outputs()[0]
-    print(f"Model input shape: {input_info.shape}")
-    print(f"Model output shape: {output_info.shape}")
-    
+    session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+    print(f"Model loaded successfully with provider: CPUExecutionProvider")
 except Exception as e:
     print(f"ERROR: Failed to load ONNX model: {e}")
     sys.exit(0)
@@ -157,8 +59,7 @@ if labels_path and os.path.exists(labels_path):
         labels = json.load(f)
     print(f"Loaded {len(labels)} class labels from {labels_path}")
 else:
-    # Custom waste detection labels for your model
-    labels = ['cans', 'plastic bottle', 'plastic bag', 'water hyacinth', 'water lettuce', 'salvinia']
+    labels = ['water lettuce', 'water hyacinth', 'plastic bottle', 'salvinia', 'cans', 'plastic bag']
     print(f"Using custom waste detection labels: {labels}")
 
 # Parse input to determine if image source is a file, folder, video, or USB camera
@@ -194,14 +95,13 @@ if user_res:
 
 # Check if recording is valid and set up recording
 if record:
-    if source_type not in ['video','usb']:
+    if source_type not in ['video','usb','picamera']:
         print('Recording only works for video and camera sources. Please try again.')
         sys.exit(0)
     if not user_res:
         print('Please specify resolution to record video at.')
         sys.exit(0)
     
-    # Set up recording
     record_name = 'demo1.avi'
     record_fps = 30
     recorder = cv2.VideoWriter(record_name, cv2.VideoWriter_fourcc(*'MJPG'), record_fps, (resW,resH))
@@ -222,17 +122,76 @@ elif source_type == 'video' or source_type == 'usb':
     elif source_type == 'usb': 
         cap_arg = usb_idx
     cap = cv2.VideoCapture(cap_arg)
-
-    # Set camera or video resolution if specified by user
     if user_res:
-        ret = cap.set(3, resW)
-        ret = cap.set(4, resH)
-
+        cap.set(3, resW)
+        cap.set(4, resH)
 elif source_type == 'picamera':
     from picamera2 import Picamera2
     cap = Picamera2()
     cap.configure(cap.create_video_configuration(main={"format": 'XRGB8888', "size": (resW, resH)}))
     cap.start()
+
+# Set up L298N motor driver GPIO pins
+GPIO.setmode(GPIO.BCM)
+ENA = 25  # Enable A (Motor A speed)
+IN1 = 23  # Motor A input 1
+IN2 = 24  # Motor A input 2
+ENB = 17  # Enable B (Motor B speed)
+IN3 = 27  # Motor B input 1
+IN4 = 22  # Motor B input 2
+GPIO.setup(ENA, GPIO.OUT)
+GPIO.setup(IN1, GPIO.OUT)
+GPIO.setup(IN2, GPIO.OUT)
+GPIO.setup(ENB, GPIO.OUT)
+GPIO.setup(IN3, GPIO.OUT)
+GPIO.setup(IN4, GPIO.OUT)
+
+# Initialize PWM for speed control
+pwm_a = GPIO.PWM(ENA, 1000)  # 1000 Hz frequency
+pwm_b = GPIO.PWM(ENB, 1000)
+pwm_a.start(0)  # Start PWM with 0% duty cycle
+pwm_b.start(0)
+
+# Motor control functions
+def motor_forward(speed=50):
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+    pwm_a.ChangeDutyCycle(speed)
+    pwm_b.ChangeDutyCycle(speed)
+
+def motor_backward(speed=50):
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+    pwm_a.ChangeDutyCycle(speed)
+    pwm_b.ChangeDutyCycle(speed)
+
+def motor_left(speed=50):
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.HIGH)
+    GPIO.output(IN3, GPIO.HIGH)
+    GPIO.output(IN4, GPIO.LOW)
+    pwm_a.ChangeDutyCycle(speed)
+    pwm_b.ChangeDutyCycle(speed)
+
+def motor_right(speed=50):
+    GPIO.output(IN1, GPIO.HIGH)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.HIGH)
+    pwm_a.ChangeDutyCycle(speed)
+    pwm_b.ChangeDutyCycle(speed)
+
+def motor_stop():
+    GPIO.output(IN1, GPIO.LOW)
+    GPIO.output(IN2, GPIO.LOW)
+    GPIO.output(IN3, GPIO.LOW)
+    GPIO.output(IN4, GPIO.LOW)
+    pwm_a.ChangeDutyCycle(0)
+    pwm_b.ChangeDutyCycle(0)
 
 # Set bounding box colors for waste detection classes
 bbox_colors = [
@@ -249,220 +208,174 @@ avg_frame_rate = 0
 frame_rate_buffer = []
 fps_avg_len = 200
 img_count = 0
-last_detection_time = 0
-movement_cooldown = 2.0  # Seconds between movements
 
 def preprocess_image(img, target_size):
-    """Preprocess image for ONNX model"""
+    """
+    Preprocess image for YOLOv5 ONNX model
+    """
     original_h, original_w = img.shape[:2]
-    
-    # Calculate scaling factor to maintain aspect ratio
     scale = min(target_size / original_h, target_size / original_w)
     new_h, new_w = int(original_h * scale), int(original_w * scale)
-    
-    # Resize image
     img_resized = cv2.resize(img, (new_w, new_h))
-    
-    # Create padded image
     img_padded = np.full((target_size, target_size, 3), 114, dtype=np.uint8)
-    
-    # Calculate padding offsets
     pad_x = (target_size - new_w) // 2
     pad_y = (target_size - new_h) // 2
-    
-    # Place resized image in center
     img_padded[pad_y:pad_y+new_h, pad_x:pad_x+new_w] = img_resized
-    
-    # Convert BGR to RGB and normalize
     img_rgb = cv2.cvtColor(img_padded, cv2.COLOR_BGR2RGB)
     img_normalized = img_rgb.astype(np.float32) / 255.0
-    
-    # Add batch dimension and convert to NCHW format
-    img_tensor = np.transpose(img_normalized, (2, 0, 1))[np.newaxis, ...]
-    
+    img_tensor = np.transpose(img_normalized, (2, 0, 1))
+    img_tensor = np.expand_dims(img_tensor, axis=0)
     return img_tensor, scale, pad_x, pad_y, original_w, original_h
 
 def postprocess_detections(predictions, original_w, original_h, scale, pad_x, pad_y, conf_threshold=0.5):
-    """Post-process ONNX model predictions"""
+    """
+    Post-process YOLOv5 ONNX model predictions with flexible handling
+    """
     detections = []
-    
-    try:
-        # Handle ONNX output format
-        if len(predictions.shape) == 3 and predictions.shape[0] == 1:
-            predictions = predictions[0]
-        
-        # Apply confidence threshold and NMS
-        for detection in predictions:
-            if len(detection) >= 5:
-                x_center, y_center, width, height, confidence = detection[:5]
-                
-                if confidence < conf_threshold:
-                    continue
-                
-                # Get class probabilities if available
+    if isinstance(predictions, (list, tuple)):
+        predictions = predictions[0]
+    if len(predictions.shape) == 3:
+        predictions = predictions[0]
+    num_classes = len(labels)
+    expected_channels = 5 + num_classes
+    print(f"Prediction shape: {predictions.shape}")
+    print(f"Expected channels: {expected_channels}, Actual channels: {predictions.shape[-1]}")
+    for detection in predictions:
+        if len(detection) < 5:
+            continue
+        x_center, y_center, width, height, confidence = detection[:5]
+        if confidence < conf_threshold:
+            continue
+        if len(detection) > 5:
+            class_scores = detection[5:5+num_classes] if len(detection) >= 5+num_classes else detection[5:]
+            if len(class_scores) > 0:
+                class_id = np.argmax(class_scores)
+                class_confidence = class_scores[class_id]
+            else:
                 class_id = 0
-                if len(detection) > 5:
-                    class_scores = detection[5:]
-                    class_id = np.argmax(class_scores)
-                    class_confidence = class_scores[class_id]
-                    confidence *= class_confidence
-                
-                if confidence < conf_threshold:
-                    continue
-                
-                # Convert coordinates
-                x_center = (x_center - pad_x) / scale
-                y_center = (y_center - pad_y) / scale
-                width = width / scale
-                height = height / scale
-                
-                x1 = max(0, x_center - width / 2)
-                y1 = max(0, y_center - height / 2)
-                x2 = min(original_w, x_center + width / 2)
-                y2 = min(original_h, y_center + height / 2)
-                
-                if x2 > x1 and y2 > y1:
-                    detections.append({
-                        'bbox': [int(x1), int(y1), int(x2), int(y2)],
-                        'confidence': confidence,
-                        'class_id': min(class_id, len(labels) - 1),
-                        'class_name': labels[min(class_id, len(labels) - 1)]
-                    })
-    
-    except Exception as e:
-        print(f"Error in postprocessing: {e}")
-    
+                class_confidence = 0.5
+        else:
+            class_id = 0
+            class_confidence = confidence
+        class_id = min(class_id, len(labels) - 1)
+        final_confidence = confidence * class_confidence
+        if final_confidence > conf_threshold:
+            x_center = float(x_center)
+            y_center = float(y_center)
+            width = float(width)
+            height = float(height)
+            x_center = (x_center - pad_x) / scale
+            y_center = (y_center - pad_y) / scale
+            width = width / scale
+            height = height / scale
+            x1 = int(x_center - width / 2)
+            y1 = int(y_center - height / 2)
+            x2 = int(x_center + width / 2)
+            y2 = int(y_center + height / 2)
+            x1 = max(0, min(x1, original_w))
+            y1 = max(0, min(y1, original_h))
+            x2 = max(0, min(x2, original_w))
+            y2 = max(0, min(y2, original_h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            detections.append({
+                'bbox': [x1, y1, x2, y2],
+                'confidence': final_confidence,
+                'class_id': class_id,
+                'class_name': labels[class_id]
+            })
     return detections
 
-def control_movement(detections, frame_width):
-    """Control robot movement based on detections"""
-    global last_detection_time, motor_controller
-    
-    if not enable_motors or not motor_controller:
-        return
-        
-    current_time = time.time()
-    
-    # Check cooldown period
-    if current_time - last_detection_time < movement_cooldown:
-        return
-    
-    if len(detections) == 0:
-        return
-    
-    # Find the largest detection (closest object)
-    largest_detection = max(detections, key=lambda d: (d['bbox'][2] - d['bbox'][0]) * (d['bbox'][3] - d['bbox'][1]))
-    
-    # Get center of detection
-    x1, y1, x2, y2 = largest_detection['bbox']
-    center_x = (x1 + x2) / 2
-    frame_center = frame_width / 2
-    
-    print(f"Detected {largest_detection['class_name']} at center: {center_x:.0f}")
-    
-    # Movement logic based on object position
-    if center_x < frame_center - 50:  # Object on left
-        print("Turning left towards object")
-        motor_controller.turn_left(0.3)
-    elif center_x > frame_center + 50:  # Object on right
-        print("Turning right towards object")
-        motor_controller.turn_right(0.3)
-    else:  # Object in center
-        print("Moving forward towards object")
-        motor_controller.move_forward(0.5)
-    
-    last_detection_time = current_time
+# Navigation logic
+def navigate_to_object(detections, frame_width):
+    """
+    Determine motor commands based on detected object's position
+    """
+    target_classes = ['water lettuce', 'water hyacinth', 'plastic bottle', 'salvinia', 'cans', 'plastic bag']
+    target_detection = None
+    max_area = 0
+    for detection in detections:
+        if detection['class_name'] in target_classes:
+            x1, y1, x2, y2 = detection['bbox']
+            area = (x2 - x1) * (y2 - y1)
+            if area > max_area:
+                max_area = area
+                target_detection = detection
+    if target_detection:
+        x1, y1, x2, y2 = target_detection['bbox']
+        obj_center = (x1 + x2) // 2
+        frame_center = frame_width // 2
+        threshold = frame_width // 4  # Adjust based on desired sensitivity
+        if obj_center < frame_center - threshold:
+            print(f"Object ({target_detection['class_name']}) on left, turning left")
+            motor_left(speed=50)
+        elif obj_center > frame_center + threshold:
+            print(f"Object ({target_detection['class_name']}) on right, turning right")
+            motor_right(speed=50)
+        else:
+            print(f"Object ({target_detection['class_name']}) centered, moving forward")
+            motor_forward(speed=50)
+        return True
+    else:
+        print("No target object detected, stopping")
+        motor_stop()
+        return False
 
 # Begin inference loop
 print("Starting inference loop...")
-frame_count = 0
-
 try:
     while True:
         t_start = time.perf_counter()
-        frame_count += 1
-
-        # Load frame from image source
         if source_type == 'image' or source_type == 'folder':
             if img_count >= len(imgs_list):
                 print('All images have been processed. Exiting program.')
                 break
             img_filename = imgs_list[img_count]
             frame = cv2.imread(img_filename)
-            if frame is None:
-                print(f'Failed to load image: {img_filename}')
-                img_count += 1
-                continue
             img_count += 1
-        
         elif source_type == 'video':
             ret, frame = cap.read()
             if not ret:
                 print('Reached end of the video file. Exiting program.')
                 break
-        
         elif source_type == 'usb':
             ret, frame = cap.read()
             if not ret or frame is None:
                 print('Unable to read frames from the camera. Exiting program.')
                 break
-
         elif source_type == 'picamera':
-            try:
-                frame_bgra = cap.capture_array()
-                frame = cv2.cvtColor(np.copy(frame_bgra), cv2.COLOR_BGRA2BGR)
-                if frame is None:
-                    print('Unable to read frames from the Picamera. Exiting program.')
-                    break
-            except Exception as e:
-                print(f'Picamera error: {e}')
+            frame_bgra = cap.capture_array()
+            frame = cv2.cvtColor(np.copy(frame_bgra), cv2.COLOR_BGRA2BGR)
+            if frame is None:
+                print('Unable to read frames from the Picamera. Exiting program.')
                 break
-
-        # Store original frame for display
         display_frame = frame.copy()
         original_shape = frame.shape
-
-        # Resize frame to desired display resolution
         if resize:
             display_frame = cv2.resize(display_frame, (resW, resH))
-
-        # Preprocess image for model inference
         try:
             input_tensor, scale, pad_x, pad_y, original_w, original_h = preprocess_image(frame, img_size)
         except Exception as e:
             print(f"Error in preprocessing: {e}")
             continue
-
-        # Run ONNX inference
         try:
             input_name = session.get_inputs()[0].name
             predictions = session.run(None, {input_name: input_tensor})[0]
         except Exception as e:
-            print(f"ONNX inference error: {e}")
-            continue
-
-        # Post-process predictions
+            print(f"Model inference error: {e}")
+            break
         try:
             detections = postprocess_detections(predictions, original_w, original_h, scale, pad_x, pad_y, min_thresh)
         except Exception as e:
             print(f"Error in postprocessing: {e}")
             detections = []
-
-        # Control robot movement based on detections
-        if source_type in ['usb', 'picamera']:  # Only for live camera feeds
-            control_movement(detections, original_w)
-
-        # Object counting
+        navigate_to_object(detections, original_w)
         object_count = len(detections)
-
-        # Draw detections on display frame
         for detection in detections:
             x1, y1, x2, y2 = detection['bbox']
             confidence = detection['confidence']
             class_name = detection['class_name']
             class_id = detection['class_id']
-
-            # Scale coordinates if display frame is resized
             if resize:
                 scale_x = resW / original_w
                 scale_y = resH / original_h
@@ -470,79 +383,58 @@ try:
                 y1 = int(y1 * scale_y)
                 x2 = int(x2 * scale_x)
                 y2 = int(y2 * scale_y)
-
-            # Draw bounding box
             color = bbox_colors[class_id % len(bbox_colors)]
             cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
-
-            # Draw label
-            label = f'{class_name}: {confidence:.2f}'
+            label = f'{class_name}: {int(confidence*100)}%'
             labelSize, baseLine = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
             label_ymin = max(y1, labelSize[1] + 10)
             cv2.rectangle(display_frame, (x1, label_ymin-labelSize[1]-10), 
                          (x1+labelSize[0], label_ymin+baseLine-10), color, cv2.FILLED)
             cv2.putText(display_frame, label, (x1, label_ymin-7), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-
-        # Display motor status
-        if enable_motors:
-            motor_status = "Motors: ENABLED" if motor_controller else "Motors: ERROR"
-            cv2.putText(display_frame, motor_status, (10, 20), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if motor_controller else (0, 0, 255), 2)
-
-        # Calculate and draw framerate
         if source_type in ['video', 'usb', 'picamera']:
-            cv2.putText(display_frame, f'FPS: {avg_frame_rate:.1f}', (10, 40), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        
-        # Display detection count
-        cv2.putText(display_frame, f'Objects: {object_count}', (10, 60), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        
-        # Display the frame
-        cv2.imshow('Waste Detection with Motor Control', display_frame)
-        
+            cv2.putText(display_frame, f'FPS: {avg_frame_rate:0.2f}', (10,20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
+        waste_counts = {}
+        for detection in detections:
+            class_name = detection['class_name']
+            waste_counts[class_name] = waste_counts.get(class_name, 0) + 1
+        cv2.putText(display_frame, f'Total waste items: {object_count}', (10,40), 
+                   cv2.FONT_HERSHEY_SIMPLEX, .7, (0,255,255), 2)
+        y_offset = 60
+        for waste_type, count in waste_counts.items():
+            cv2.putText(display_frame, f'{waste_type}: {count}', (10, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, .5, (0,255,255), 1)
+            y_offset += 20
+        cv2.imshow('Waste Detection - YOLOv5 ONNX', display_frame)
         if record: 
             recorder.write(display_frame)
-
-        # Handle key presses
         if source_type in ['image', 'folder']:
             key = cv2.waitKey(0)
-        elif source_type in ['video', 'usb', 'picamera']:
-            key = cv2.waitKey(1) & 0xFF
-        
+        else:
+            key = cv2.waitKey(5)
         if key == ord('q') or key == ord('Q'):
             break
         elif key == ord('s') or key == ord('S'):
-            if motor_controller:
-                motor_controller.stop()
-            print("Stopped. Press any key to continue...")
             cv2.waitKey(0)
-        
-        # Calculate FPS
+        elif key == ord('p') or key == ord('P'):
+            cv2.imwrite('capture.png', display_frame)
         t_stop = time.perf_counter()
-        frame_rate_calc = 1.0 / (t_stop - t_start)
-
-        # Update frame rate buffer
+        frame_rate_calc = float(1/(t_stop - t_start))
         if len(frame_rate_buffer) >= fps_avg_len:
             frame_rate_buffer.pop(0)
-        frame_rate_buffer.append(frame_rate_calc)
-
-        # Calculate average FPS
+            frame_rate_buffer.append(frame_rate_calc)
+        else:
+            frame_rate_buffer.append(frame_rate_calc)
         avg_frame_rate = np.mean(frame_rate_buffer)
-
-except KeyboardInterrupt:
-    print("\nInterrupted by user")
-
 finally:
-    # Cleanup
-    print(f'Processing complete. Average FPS: {avg_frame_rate:.2f}')
+    print(f'Average pipeline FPS: {avg_frame_rate:.2f}')
     if source_type in ['video', 'usb']:
         cap.release()
     elif source_type == 'picamera':
         cap.stop()
     if record: 
         recorder.release()
-    if motor_controller:
-        motor_controller.cleanup()
+    motor_stop()
+    GPIO.cleanup()
     cv2.destroyAllWindows()
